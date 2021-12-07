@@ -25,6 +25,7 @@ import modeling
 import optimization
 import tokenization
 import tensorflow as tf
+import numpy as np
 
 flags = tf.flags
 
@@ -118,6 +119,9 @@ tf.flags.DEFINE_string(
     "metadata.")
 
 tf.flags.DEFINE_string("master", None, "[Optional] TensorFlow master URL.")
+tf.flags.DEFINE_string("which_bias", "bert", "bias logprobs to load")
+tf.flags.DEFINE_string("teacherbias_path", None, "teacher probs")
+tf.flags.DEFINE_string("debiasmode", "none", "[none, upweight, lm, poe, adaptive_poe, mindtradeoff]")
 
 flags.DEFINE_integer(
     "num_tpu_cores", 8,
@@ -127,7 +131,12 @@ flags.DEFINE_integer(
 class InputExample(object):
   """A single training/test example for simple sequence classification."""
 
-  def __init__(self, guid, text_a, text_b=None, label=None):
+  def __init__(self, guid, text_a, text_b=None, label=None, 
+                  features={
+                    "bias_logprobs": [0, 0],
+                    "teacher_probs":[0, 0],
+                            },
+              ):
     """Constructs a InputExample.
 
     Args:
@@ -143,6 +152,7 @@ class InputExample(object):
     self.text_a = text_a
     self.text_b = text_b
     self.label = label
+    self.features = features
 
 
 class PaddingInputExample(object):
@@ -166,12 +176,25 @@ class InputFeatures(object):
                input_mask,
                segment_ids,
                label_id,
-               is_real_example=True):
+               is_real_example=True,
+               bias_logprobs = [0, 0],
+               hissubseq_logprobs = [0, 0],
+               allinp_logprobs =[0, 0],
+               others_logprobs = [0, 0],
+               neginh_logprobs = [0, 0],
+               teacher_probs = [0, 0],
+               ):
     self.input_ids = input_ids
     self.input_mask = input_mask
     self.segment_ids = segment_ids
     self.label_id = label_id
     self.is_real_example = is_real_example
+    self.bias_logprobs = bias_logprobs
+    self.allinp_logprobs = allinp_logprobs
+    self.hissubseq_logprobs = hissubseq_logprobs
+    self.others_logprobs = others_logprobs
+    self.neginh_logprobs = neginh_logprobs
+    self.teacher_probs = teacher_probs
 
 
 class DataProcessor(object):
@@ -257,6 +280,7 @@ class MnliProcessor(DataProcessor):
 
   def get_train_examples(self, data_dir):
     """See base class."""
+    print("---datadir:", data_dir)
     return self._create_examples(
         self._read_tsv(os.path.join(data_dir, "train.tsv")), "train")
 
@@ -373,6 +397,53 @@ class ColaProcessor(DataProcessor):
           InputExample(guid=guid, text_a=text_a, text_b=None, label=label))
     return examples
 
+class QQPProcessor(DataProcessor):
+  def get_train_examples(self, data_dir):
+    return self._create_examples(self._read_tsv(os.path.join(data_dir, "dev.tsv")), "train")
+
+  def get_dev_examples(self, data_dir):
+    return self._create_examples(self._read_tsv(os.path.join(data_dir, "dev.tsv")), "dev")
+
+  def get_test_examples(self, data_dir):
+    return self._create_examples(self._read_tsv(os.path.join(data_dir, "test.tsv")), "test")
+  
+  def get_labels(self):
+    return ["0", "1"]
+  
+  def _create_examples(self, lines, set_type):
+    examples = []
+    for (i, line) in enumerate(lines):
+      if i == 0:
+        continue
+      guid = "%s-%s" %(set_type, i-1)
+      if set_type.startswith("test"):
+        label = tokenization.convert_to_unicode(line[3])
+        text_a = line[1]
+        text_b = line[2]
+      else:
+        text_a = line[3]
+        text_b = line[4] 
+        label = tokenization.convert_to_unicode(line[5])
+      examples.append(InputExample(guid=guid, text_a=text_a, text_b = text_b, label=label))
+    return examples
+
+  def get_sanity_test(self, name):
+    lines = self._read_tsv("/jyzhao/data/paws-wiki" + name)
+    examples = []
+    for (i, line) in enumerate(lines):
+      guid= i
+      text_a = line[1]
+      text_b = line[2]
+      label = line[3]
+      examples.append(InputExample(guid=guid, text_a = text_a, text_b = text_b, label=label))
+    return examples
+  def get_prediction_sets(self, data_dir):
+    return [
+      ("paws_test", lambda: self.get_test_examples(data_dir)),
+      ("h_is_subseq2", lambda: self.get_sanity_test("h_is_subseq2.tsv")),
+      ("all_in_p", lambda: self.get_sanity_test("all_in_p.tsv")),
+      ("paws_qqp_test", lambda: self.get_test_examples(data_dir, "qqp_paws_test")),
+    ]
 
 def convert_single_example(ex_index, example, label_list, max_seq_length,
                            tokenizer):
@@ -457,6 +528,13 @@ def convert_single_example(ex_index, example, label_list, max_seq_length,
   assert len(segment_ids) == max_seq_length
 
   label_id = label_map[example.label]
+  bias_logprobs = example.features["bias_logprobs"] if "bias_logprobs" in example.features else [0] * len(list(label_map.keys()))
+  teacher_probs = example.features["teacher_probs"] if "teacher_probs" in example.features else [0] * len(list(label_map.keys()))
+
+  hissubseq_logprobs = example.features["hissubseq_logprobs"] if "hissubseq_logprobs" in example.features else [0] * len(list(label_map.keys()))
+  allinp_logprobs = example.features["allinp_logprobs"] if "allinp_logprobs" in example.features else [0] * len(list(label_map.keys()))
+  others_logprobs = example.features["others_logprobs"] if "others_logprobs" in example.features else [0] * len(list(label_map.keys()))
+
   if ex_index < 5:
     tf.logging.info("*** Example ***")
     tf.logging.info("guid: %s" % (example.guid))
@@ -466,13 +544,21 @@ def convert_single_example(ex_index, example, label_list, max_seq_length,
     tf.logging.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
     tf.logging.info("segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
     tf.logging.info("label: %s (id = %d)" % (example.label, label_id))
+    tf.logging.info(f"bias_logprobs:{bias_logprobs}")
+    tf.logging.info(f"teacher_probs:{teacher_probs}")
 
   feature = InputFeatures(
       input_ids=input_ids,
       input_mask=input_mask,
       segment_ids=segment_ids,
       label_id=label_id,
-      is_real_example=True)
+      is_real_example=True,
+      bias_logprobs = bias_logprobs,
+      hissubseq_logprobs = hissubseq_logprobs,
+      allinp_logprobs = allinp_logprobs,
+      others_logprobs = others_logprobs,
+      teacher_probs= teacher_probs,
+      )
   return feature
 
 
@@ -492,6 +578,9 @@ def file_based_convert_examples_to_features(
     def create_int_feature(values):
       f = tf.train.Feature(int64_list=tf.train.Int64List(value=list(values)))
       return f
+    def create_float_feature(values):
+      f = tf.train.Feature(float_list = tf.train.FloatList(value=list(values)))
+      return f
 
     features = collections.OrderedDict()
     features["input_ids"] = create_int_feature(feature.input_ids)
@@ -500,6 +589,11 @@ def file_based_convert_examples_to_features(
     features["label_ids"] = create_int_feature([feature.label_id])
     features["is_real_example"] = create_int_feature(
         [int(feature.is_real_example)])
+    features["bias_logprobs"] = create_float_feature(feature.bias_logprobs)
+    features["teacher_probs"] = create_float_feature(feature.teacher_probs)
+    features["hissubseq_logprobs"] = create_float_feature(feature.hissubseq_logprobs)
+    features["allinp_logprobs"] = create_float_feature(feature.allinp_logprobs)
+    features["others_logprobs"] = create_float_feature(feature.others_logprobs)
 
     tf_example = tf.train.Example(features=tf.train.Features(feature=features))
     writer.write(tf_example.SerializeToString())
@@ -516,6 +610,11 @@ def file_based_input_fn_builder(input_file, seq_length, is_training,
       "segment_ids": tf.FixedLenFeature([seq_length], tf.int64),
       "label_ids": tf.FixedLenFeature([], tf.int64),
       "is_real_example": tf.FixedLenFeature([], tf.int64),
+      "bias_logprobs": tf.FixedLenFeature([2], tf.float32),
+      "teacher_probs": tf.FixedLenFeature([2], tf.float32),
+      "hissubseq_logprobs":tf.FixedLenFeature([2], tf.float32), 
+      "allinp_logprobs":tf.FixedLenFeature([2], tf.float32), 
+      "others_logprobs":tf.FixedLenFeature([2], tf.float32), 
   }
 
   def _decode_record(record, name_to_features):
@@ -572,7 +671,10 @@ def _truncate_seq_pair(tokens_a, tokens_b, max_length):
 
 
 def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
-                 labels, num_labels, use_one_hot_embeddings):
+                 labels, num_labels, use_one_hot_embeddings,
+                 bias_logprobs= [0, 0], hissubseq_logprobs= [0, 0], allinp_logprobs= [0, 0], 
+                 others_logprobs= [0, 0], teacher_probs= [0, 0], debiasmode = "other",
+                 ):
   """Creates a classification model."""
   model = modeling.BertModel(
       config=bert_config,
@@ -598,6 +700,14 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
   output_bias = tf.get_variable(
       "output_bias", [num_labels], initializer=tf.zeros_initializer())
 
+  # bias_lin = tf.keras.layer.Dense(1, name="bias_lin")
+  bias_lin_weights = tf.get_variable("bias_linear_weights", [1, hidden_size],  
+          initializer=tf.truncated_normal_initializer(stddev=0.02))
+  bias_lin_bias = tf.get_variable("bias_linear_bias", [1], initializer=tf.zeros_initializer()) 
+  if debiasmode == "adaptive_poe":
+    logits_weight = tf.get_variable(
+      "biaslogits_weight", [1, 3], initialzer = tf.truncated_normal_initializer(stddev=0.02)
+    )
   with tf.variable_scope("loss"):
     if is_training:
       # I.e., 0.1 dropout
@@ -611,6 +721,52 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
     one_hot_labels = tf.one_hot(labels, depth=num_labels, dtype=tf.float32)
 
     per_example_loss = -tf.reduce_sum(one_hot_labels * log_probs, axis=-1)
+
+    if debiasmode == "poe":
+      tf.logging.info(" -- using poe")
+      per_example_loss = -tf.reduce_sum(one_hot_labels * tf.nn.log_softmax(log_probs + bias_logprobs, axis = -1),
+                                        axis = -1)
+    elif debiasmode == "adaptive_poe":
+      tf.logging.info(" -- fuse all the bias logits from different-sized biasonly model; w/ mlp")
+      hissubseq_logprobs = tf.expand_dims(hissubseq_logprobs, 1)
+      allinp_logprobs = tf.expand_dims(allinp_logprobs, 1)
+      others_logprobs = tf.expand_dims(others_logprobs, 1)
+      allbias_logprobs = tf.concat([hissubseq_logprobs, allinp_logprobs, others_logprobs], axis =1)
+      logits_weight = tf.nn.softmax(logits_weight, axis = -1)
+      bias_logprobs_fused = tf.matmul(logits_weight, allbias_logprobs)
+      per_example_loss = -tf.reduce_sum( one_hot_labels * tf.nn.log_softmax(log_probs + bias_logprobs_fused, axis = -1), 
+                              axis = -1)
+    elif debiasmode == "lm":
+      tf.logginginfo ("using LM-H loss")
+      # factor = tf.math.softplus(bias_lin(output_layer))
+      t = tf.matmul(output_layer, bias_lin_weights, transpose_b = True)
+      t = tf.nn.bias_add(t, bias_lin_bias)
+      factor = tf.math.softplus(t)
+      bias_logprobs *= factor
+      bias_lp = tf.nn.log_softmax(bias_logprobs, 1)
+      entropy = -tf.reduce_sum((tf.math.exp(bias_lp) * bias_lp), 1)
+      per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels = labels, logits = (log_probs + bias_logprobs)) + 0.03 * entropy
+
+    elif debiasmode == "upweight":
+      tf.logging.info(" -- using biasprob to updweith examples tat is hard to learn by biasonly model")
+      bias_prob = tf.math.exp(bias_logprobs)
+      per_example_loss = -tf.reduce_sum( one_hot_labels * log_probs * (1-bias_prob), axis = -1)
+
+    elif debiasmode == "mindtradeoff":
+      tf.logging.info(" -- using mindtradeoff")
+      probs = tf.nn.softmax(logits, axis = 1)
+
+      weights = 1 - tf.reduce_sum(one_hot_labels * tf.exp(bias_logprobs), axis = 1)
+      weights = tf.broadcast_to(tf.exapand_dims(weights, 1), teacher_probs.shape)
+
+      exp_teacher_probs = teacher_probs ** weights
+      norm_teacher_probs = exp_teacher_probs / tf.broadcast_to(
+        tf.expand_dims(tf.reduce_sum(exp_teacher_probs, 1), 1),
+        teacher_probs.shape
+      )
+      per_example_loss = -tf.reduce_sum(norm_teacher_probs * tf.log(probs), 1)
+
+
     loss = tf.reduce_mean(per_example_loss)
 
     return (loss, per_example_loss, logits, probabilities)
@@ -618,7 +774,7 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
 
 def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
-                     use_one_hot_embeddings):
+                     use_one_hot_embeddings, debiasmode):
   """Returns `model_fn` closure for TPUEstimator."""
 
   def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
@@ -632,6 +788,13 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
     input_mask = features["input_mask"]
     segment_ids = features["segment_ids"]
     label_ids = features["label_ids"]
+    bias_logprobs = features["bias_logprobs"]
+    hissubseq_logprobs = features["hissubseq_logprobs"]
+    allinp_logprobs = features["allinp_logprobs"]
+    others_logprobs = features["others_logprobs"]
+    if "teacher_probs" in features:
+      teacher_probs = features["teacher_probs"]
+
     is_real_example = None
     if "is_real_example" in features:
       is_real_example = tf.cast(features["is_real_example"], dtype=tf.float32)
@@ -642,7 +805,8 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
 
     (total_loss, per_example_loss, logits, probabilities) = create_model(
         bert_config, is_training, input_ids, input_mask, segment_ids, label_ids,
-        num_labels, use_one_hot_embeddings)
+        num_labels, use_one_hot_embeddings, bias_logprobs, hissubseq_logprobs, allinp_logprobs, others_logprobs,
+        teacher_probs, debiasmode)
 
     tvars = tf.trainable_variables()
     initialized_variable_names = {}
@@ -781,13 +945,14 @@ def convert_examples_to_features(examples, label_list, max_seq_length,
 
 
 def main(_):
-  tf.logging.set_verbosity(tf.logging.INFO)
+  tf.logging.set_verbosity(tf.logging.FATAL)
 
   processors = {
       "cola": ColaProcessor,
       "mnli": MnliProcessor,
       "mrpc": MrpcProcessor,
       "xnli": XnliProcessor,
+      "qqp": QQPProcessor,
   }
 
   tokenization.validate_case_matches_checkpoint(FLAGS.do_lower_case,
@@ -830,6 +995,7 @@ def main(_):
       master=FLAGS.master,
       model_dir=FLAGS.output_dir,
       save_checkpoints_steps=FLAGS.save_checkpoints_steps,
+      log_step_count_steps=50,
       tpu_config=tf.contrib.tpu.TPUConfig(
           iterations_per_loop=FLAGS.iterations_per_loop,
           num_shards=FLAGS.num_tpu_cores,
@@ -838,8 +1004,28 @@ def main(_):
   train_examples = None
   num_train_steps = None
   num_warmup_steps = None
+
+  bias_map = load_bias(FLAGS.which_bias)
+  teacher_probs_map = load_teacher_probs(FLAGS.teacherbias_path)
+
+
   if FLAGS.do_train:
     train_examples = processor.get_train_examples(FLAGS.data_dir)
+    tf.logging.info("update training examples; add the bias_logprobs to features")
+    for tex in train_examples:
+      tex.features["bias_logprobs"] = [float(x) for x in bias_map[tex.guid]]
+      tex.features["teacher_probs"] = [float(x) for x in teacher_probs_map[tex.guid]]
+    tf.logging.info(f"---- train examples[0]: {train_examples[0]}")
+    if FLAGS.debiasmode == "adaptive_poe":
+      tf.logging.info(" --load all biaslogits and update to train.features")
+      allbias_logprobs = load_all_logits(FLAGS.which_bias)
+      for tex in train_examples:
+        tex.features["allinp_logprobs"] = allbias_logprobs[tex.guid][0]
+        tex.features["hissubseq_logprobs"] = allbias_logprobs[tex.guid][1]
+        tex.features["others_logprobs"] = allbias_logprobs[tex.guid][2]
+        # tex.features["neginh_logprobs"] = allbias_logprobs[tex.guid][3]
+
+
     num_train_steps = int(
         len(train_examples) / FLAGS.train_batch_size * FLAGS.num_train_epochs)
     num_warmup_steps = int(num_train_steps * FLAGS.warmup_proportion)
@@ -852,7 +1038,9 @@ def main(_):
       num_train_steps=num_train_steps,
       num_warmup_steps=num_warmup_steps,
       use_tpu=FLAGS.use_tpu,
-      use_one_hot_embeddings=FLAGS.use_tpu)
+      use_one_hot_embeddings=FLAGS.use_tpu,
+      debiasmode = FLAGS.debiasmode,
+      )
 
   # If TPU is not available, this will fall back to normal Estimator on CPU
   # or GPU.
@@ -971,6 +1159,76 @@ def main(_):
         num_written_lines += 1
     assert num_written_lines == num_actual_predict_examples
 
+def load_teacher_probs(file_path = None):
+  teacher_probs = {}
+  with open(file_path, "r") as teacher_file:
+    all_lines = teacher_file.readlines()
+    for (i, line) in enumerate(all_lines):
+      vs = line.strip().split("\t")
+      k = "%s-%s" %("train", tokenization.convert_to_unicode(str(i)))
+      teacher_probs[k] = vs[:2]
+  return teacher_probs
+
+def load_bias(bias_name):
+  # name = "_".join(FLAGS.output_dir.split("/")[5].split("_")[-2:])
+  # if bias_name == "bert_paws":
+  #   if name.startswith("bert"):
+  #     path = f"/cns/oo-d/home/jieyuz/{name}_HisSubseq/qqp_0/train_prob"
+    
+  path = f"/home/data/robustness/MNLI/bias/p_bias"
+  bias = {}
+  with open(path, "r") as f:
+    lines = f.readlines()
+    for (i, line) in enumerate(lines):
+      vs = np.array(line.strip().split("\t"), dtype=float)
+      bias_k = "%s-%s" %("train", tokenization.convert_to_unicode(str(i)))
+      # assert len(vs) == 2
+      if sum(vs) == 0:
+        bias[bias_k] = [0, 0]
+      else:
+        bias[bias_k] = [np.log(vs[0]), np.log(vs[1])]
+  return bias
+
+
+def load_all_logits(bias_name):
+  allinp_path = "bert_base_AllinP/qqp_0/train_prob"
+  hissubseq_path = "bert_medium_HisSubseq/qqp_0/train_prob"
+  others_path = "data/QQP/lr_train_nonbinary"
+  bias = {}
+  with open(allinp_path, "r") as f:
+    lines = f.readlines()
+    for (i, line) in enumerate(lines):
+        vs = np.array(line.strip().split("\t"), dtype=float)
+        bias_k = "%s-%s" %("train", tokenization.convert_to_unicode(str(i)))
+        assert len(vs) == 2
+        if sum(vs) == 0:
+          bias[bias_k] = [[0, 0]]
+        else:
+          bias[bias_k] = [[np.log(vs[0]), np.log(vs[1])]]
+
+  with open(hissubseq_path, "r") as f:
+    lines = f.readlines()
+    for (i, line) in enumerate(lines):
+        vs = np.array(line.strip().split("\t"), dtype=float)
+        bias_k = "%s-%s" %("train", tokenization.convert_to_unicode(str(i)))
+        assert len(vs) == 2
+        if sum(vs) == 0:
+          bias[bias_k].append([0, 0])
+        else:
+          bias[bias_k].append([np.log(vs[0]), np.log(vs[1])])
+  
+  with open(others_path, "r") as f:
+    lines = f.readlines()
+    for (i, line) in enumerate(lines):
+        vs = np.array(line.strip().split("\t"), dtype=float)
+        bias_k = "%s-%s" %("train", tokenization.convert_to_unicode(str(i)))
+        assert len(vs) == 2
+        if sum(vs) == 0:
+          bias[bias_k].append([0, 0])
+        else:
+          bias[bias_k].append([np.log(vs[0]), np.log(vs[1])])
+
+  return bias
 
 if __name__ == "__main__":
   flags.mark_flag_as_required("data_dir")
@@ -978,4 +1236,5 @@ if __name__ == "__main__":
   flags.mark_flag_as_required("vocab_file")
   flags.mark_flag_as_required("bert_config_file")
   flags.mark_flag_as_required("output_dir")
+
   tf.app.run()
