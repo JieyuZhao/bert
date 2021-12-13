@@ -119,7 +119,7 @@ tf.flags.DEFINE_string(
     "metadata.")
 
 tf.flags.DEFINE_string("master", None, "[Optional] TensorFlow master URL.")
-tf.flags.DEFINE_string("which_bias", "bert", "bias logprobs to load")
+tf.flags.DEFINE_string("which_bias", None, "bias logprobs to load")
 tf.flags.DEFINE_string("teacherbias_path", None, "teacher probs")
 tf.flags.DEFINE_string("debiasmode", "none", "[none, upweight, lm, poe, adaptive_poe, mindtradeoff]")
 
@@ -427,8 +427,9 @@ class QQPProcessor(DataProcessor):
       examples.append(InputExample(guid=guid, text_a=text_a, text_b = text_b, label=label))
     return examples
 
-  def get_sanity_test(self, name):
-    lines = self._read_tsv("/jyzhao/data/paws-wiki" + name)
+  def get_sanity_test(self, filename):
+    lines = self._read_tsv(filename)
+
     examples = []
     for (i, line) in enumerate(lines):
       guid= i
@@ -439,10 +440,10 @@ class QQPProcessor(DataProcessor):
     return examples
   def get_prediction_sets(self, data_dir):
     return [
-      ("paws_test", lambda: self.get_test_examples(data_dir)),
-      ("h_is_subseq2", lambda: self.get_sanity_test("h_is_subseq2.tsv")),
-      ("all_in_p", lambda: self.get_sanity_test("all_in_p.tsv")),
-      ("paws_qqp_test", lambda: self.get_test_examples(data_dir, "qqp_paws_test")),
+      ("paws_wiki_test", self.get_sanity_test("/home/data/Examples/PAWS_WIKI-examples/test.tsv")),
+      # ("h_is_subseq", lambda: self.get_sanity_test("h_is_subseq2.tsv")),
+      # ("all_in_p", lambda: self.get_sanity_test("all_in_p.tsv")),
+      ("paws_qqp_devtest", self.get_sanity_test("/home/data/paws/paws_qqp/output/dev_and_test.tsv")),
     ]
 
 def convert_single_example(ex_index, example, label_list, max_seq_length,
@@ -700,10 +701,6 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
   output_bias = tf.get_variable(
       "output_bias", [num_labels], initializer=tf.zeros_initializer())
 
-  # bias_lin = tf.keras.layer.Dense(1, name="bias_lin")
-  bias_lin_weights = tf.get_variable("bias_linear_weights", [1, hidden_size],  
-          initializer=tf.truncated_normal_initializer(stddev=0.02))
-  bias_lin_bias = tf.get_variable("bias_linear_bias", [1], initializer=tf.zeros_initializer()) 
   if debiasmode == "adaptive_poe":
     logits_weight = tf.get_variable(
       "biaslogits_weight", [1, 3], initialzer = tf.truncated_normal_initializer(stddev=0.02)
@@ -739,6 +736,10 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
     elif debiasmode == "lm":
       tf.logginginfo ("using LM-H loss")
       # factor = tf.math.softplus(bias_lin(output_layer))
+      # bias_lin = tf.keras.layer.Dense(1, name="bias_lin")
+      bias_lin_weights = tf.get_variable("bias_linear_weights", [1, hidden_size],  
+          initializer=tf.truncated_normal_initializer(stddev=0.02))
+      bias_lin_bias = tf.get_variable("bias_linear_bias", [1], initializer=tf.zeros_initializer()) 
       t = tf.matmul(output_layer, bias_lin_weights, transpose_b = True)
       t = tf.nn.bias_add(t, bias_lin_bias)
       factor = tf.math.softplus(t)
@@ -1013,8 +1014,15 @@ def main(_):
     train_examples = processor.get_train_examples(FLAGS.data_dir)
     tf.logging.info("update training examples; add the bias_logprobs to features")
     for tex in train_examples:
-      tex.features["bias_logprobs"] = [float(x) for x in bias_map[tex.guid]]
-      tex.features["teacher_probs"] = [float(x) for x in teacher_probs_map[tex.guid]]
+      if bias_map is not None:
+        bias_logprob = [float(x) for x in bias_map[tex.guid]]
+      else:
+        bias_logprob = [0.0, 0.0]
+      tex.features["bias_logprobs"] = bias_logprob
+      if teacher_probs_map is not None:
+        tex.features["teacher_probs"] = [float(x) for x in teacher_probs_map[tex.guid]]
+      else:
+        tex.features["teacher_probs"] = [0.0, 0]
     tf.logging.info(f"---- train examples[0]: {train_examples[0]}")
     if FLAGS.debiasmode == "adaptive_poe":
       tf.logging.info(" --load all biaslogits and update to train.features")
@@ -1114,53 +1122,57 @@ def main(_):
         writer.write("%s = %s\n" % (key, str(result[key])))
 
   if FLAGS.do_predict:
-    predict_examples = processor.get_test_examples(FLAGS.data_dir)
-    num_actual_predict_examples = len(predict_examples)
-    if FLAGS.use_tpu:
-      # TPU requires a fixed batch size for all batches, therefore the number
-      # of examples must be a multiple of the batch size, or else examples
-      # will get dropped. So we pad with fake examples which are ignored
-      # later on.
-      while len(predict_examples) % FLAGS.predict_batch_size != 0:
-        predict_examples.append(PaddingInputExample())
+    # predict_examples = processor.get_test_examples(FLAGS.data_dir)
+    all_predict_examples = processor.get_prediction_sets(FLAGS.data_dir)
+    for dataset_name, predict_examples in all_predict_examples:
+      num_actual_predict_examples = len(predict_examples)
+      if FLAGS.use_tpu:
+        # TPU requires a fixed batch size for all batches, therefore the number
+        # of examples must be a multiple of the batch size, or else examples
+        # will get dropped. So we pad with fake examples which are ignored
+        # later on.
+        while len(predict_examples) % FLAGS.predict_batch_size != 0:
+          predict_examples.append(PaddingInputExample())
 
-    predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
-    file_based_convert_examples_to_features(predict_examples, label_list,
-                                            FLAGS.max_seq_length, tokenizer,
-                                            predict_file)
+      predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
+      file_based_convert_examples_to_features(predict_examples, label_list,
+                                              FLAGS.max_seq_length, tokenizer,
+                                              predict_file)
 
-    tf.logging.info("***** Running prediction*****")
-    tf.logging.info("  Num examples = %d (%d actual, %d padding)",
-                    len(predict_examples), num_actual_predict_examples,
-                    len(predict_examples) - num_actual_predict_examples)
-    tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
+      tf.logging.info("***** Running prediction*****")
+      tf.logging.info("  Num examples = %d (%d actual, %d padding)",
+                      len(predict_examples), num_actual_predict_examples,
+                      len(predict_examples) - num_actual_predict_examples)
+      tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
 
-    predict_drop_remainder = True if FLAGS.use_tpu else False
-    predict_input_fn = file_based_input_fn_builder(
-        input_file=predict_file,
-        seq_length=FLAGS.max_seq_length,
-        is_training=False,
-        drop_remainder=predict_drop_remainder)
+      predict_drop_remainder = True if FLAGS.use_tpu else False
+      predict_input_fn = file_based_input_fn_builder(
+          input_file=predict_file,
+          seq_length=FLAGS.max_seq_length,
+          is_training=False,
+          drop_remainder=predict_drop_remainder)
 
-    result = estimator.predict(input_fn=predict_input_fn)
+      result = estimator.predict(input_fn=predict_input_fn)
 
-    output_predict_file = os.path.join(FLAGS.output_dir, "test_results.tsv")
-    with tf.gfile.GFile(output_predict_file, "w") as writer:
-      num_written_lines = 0
-      tf.logging.info("***** Predict results *****")
-      for (i, prediction) in enumerate(result):
-        probabilities = prediction["probabilities"]
-        if i >= num_actual_predict_examples:
-          break
-        output_line = "\t".join(
-            str(class_probability)
-            for class_probability in probabilities) + "\n"
-        writer.write(output_line)
-        num_written_lines += 1
-    assert num_written_lines == num_actual_predict_examples
+      output_predict_file = os.path.join(FLAGS.output_dir, f"test_results_{dataset_name}.tsv")
+      with tf.gfile.GFile(output_predict_file, "w") as writer:
+        num_written_lines = 0
+        tf.logging.info("***** Predict results *****")
+        for (i, prediction) in enumerate(result):
+          probabilities = prediction["probabilities"]
+          if i >= num_actual_predict_examples:
+            break
+          output_line = "\t".join(
+              str(class_probability)
+              for class_probability in probabilities) + "\n"
+          writer.write(output_line)
+          num_written_lines += 1
+      assert num_written_lines == num_actual_predict_examples
 
 def load_teacher_probs(file_path = None):
   teacher_probs = {}
+  if file_path is None:
+    return None
   with open(file_path, "r") as teacher_file:
     all_lines = teacher_file.readlines()
     for (i, line) in enumerate(all_lines):
@@ -1175,7 +1187,9 @@ def load_bias(bias_name):
   #   if name.startswith("bert"):
   #     path = f"/cns/oo-d/home/jieyuz/{name}_HisSubseq/qqp_0/train_prob"
     
-  path = f"/home/data/robustness/MNLI/bias/p_bias"
+  if bias_name == "None":
+    return None
+  path = f"/home/data/QQP/bias/" + bias_name
   bias = {}
   with open(path, "r") as f:
     lines = f.readlines()

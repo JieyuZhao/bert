@@ -13,17 +13,19 @@ from typing import List, Tuple, Iterable, TypeVar
 import regex
 import nltk
 
+T = TypeVar('T')
+
 def flatten_list(iterable_of_lists: Iterable[Iterable[T]]) -> List[T]:
   """Unpack lists into a single list."""
   return [x for sublist in iterable_of_lists for x in sublist]
 
-class Tokenizer(Configured):
-  def tokenize(self, text: str) -> List[str]:
-    raise NotImplementedError()
+# class Tokenizer(Configured):
+#   def tokenize(self, text: str) -> List[str]:
+#     raise NotImplementedError()
 
-  def tokenize_with_inverse(self, text: str) -> Tuple[List[str], np.ndarray]:
-    """Tokenize the text, and return start/end character mapping of each token within `text`"""
-    raise NotImplementedError()
+#   def tokenize_with_inverse(self, text: str) -> Tuple[List[str], np.ndarray]:
+#     """Tokenize the text, and return start/end character mapping of each token within `text`"""
+#     raise NotImplementedError()
 
 
 _double_quote_re = regex.compile(u"\"|``|''")
@@ -51,7 +53,7 @@ def convert_to_spans(raw_text: str, text: List[str]) -> np.ndarray:
   return all_spans
 
 
-class NltkAndPunctTokenizer(Tokenizer):
+class NltkAndPunctTokenizer():
   """Tokenize ntlk, but additionally split on most punctuations symbols"""
 
   def __init__(self, split_dash=True, split_single_quote=False, split_period=False, split_comma=False):
@@ -144,10 +146,10 @@ def build_mnli_bias_only(out_dir):
 
   tok = NltkAndPunctTokenizer()
 
-  def read_tsv(path):
+  def read_tsv(path, quotechar=None):
       import csv
       with open(path, "r") as f:
-        reader = csv.reader(f, delimiter="\t")
+        reader = csv.reader(f, delimiter="\t", quotechar=quotechar)
         lines = []
         for line in reader:
             lines.append(line)
@@ -167,9 +169,9 @@ def build_mnli_bias_only(out_dir):
         label = "contradiction"
       else:
         label = line[-1]
-      examples.append([guid, text_a, text_b, labelmap[label]])
+      examples.append([guid, text_a, text_b, label])
     return examples
-  def _create_qqp_examples(self, lines, set_type):
+  def _create_qqp_examples(lines, set_type):
     examples = []
     for (i, line) in enumerate(lines):
       if i == 0:
@@ -187,17 +189,19 @@ def build_mnli_bias_only(out_dir):
     return examples
 
   dataset_to_examples = {}
-  QQP_training = read_tsv("/home/jyzhao/git/data/QQP/train.tsv")
-  dataset_to_examples["qqp_train"] = _create_qqp_examples(QQP_training)
-  MNLI_training = read_tsv("/home/jyzhao/git/data/MNLI/tran.tsv")
-  dataset_to_examples["mnli_train"] = _create_mnli_examples(MNLI_training)
+  QQP_training = read_tsv("/home/data/QQP/train.tsv")
+  dataset_to_examples["qqp_train"] = _create_qqp_examples(QQP_training, "train")
+  QQP_training = read_tsv("/home/data/QQP/dev.tsv")
+  dataset_to_examples["qqp_dev"] = _create_qqp_examples(QQP_training, "dev")
+  # MNLI_training = read_tsv("/home/data/MNLI/dev.tsv")
+  # dataset_to_examples["mnli_dev"] = _create_mnli_examples(MNLI_training, "dev")
 
 
   # Our models will only distinguish entailment vs (neutral/contradict)
   for examples in dataset_to_examples.values():
     for i, ex in enumerate(examples):
-      if ex.label == 2:
-        examples[i] = ex._replace(label=0)
+      if ex[3] == 2:
+        examples[i][3] = 0
   negations =  ["not", "no", "n't", "never", "nothing", "none", "nobody", "nowhere", "neither"]
 
   # Build the features, store as a pandas dataset
@@ -206,18 +210,18 @@ def build_mnli_bias_only(out_dir):
     tf.logging.info("Building features for %s.." % name)
     features = []
     for example in examples:
-      h = [x.lower() for x in tok(example[2])]
-      p = [x.lower() for x in tok(example[1])]
+      h = [x.lower() for x in tok.tokenize(example[2])]
+      p = [x.lower() for x in tok.tokenize(example[1])]
       p_words = set(p)
       neg_in_h = sum(x in h for x in negations)
       n_words_in_p = sum(x in p_words for x in h)
       fe = {
-        "h-is-subseq": is_subseq(h, p),
-        "all-in-p": n_words_in_p == len(h),
+        "h-is-subseq": 1 if is_subseq(h, p) else 0,
+        "all-in-p": 1 if n_words_in_p == len(h) else 0,
         "percent-in-p": n_words_in_p / len(h),
         "log-len-diff": np.log(max(len(p) - len(h), 1)),
         "neg-in-h": 1 if neg_in_h > 0 else 0,
-        # "label": example.label
+        "label": example[-1],
       }
 
     #   h_vecs = [w2v[w] for w in example.hypothesis if w in w2v]
@@ -240,9 +244,9 @@ def build_mnli_bias_only(out_dir):
     dataset_to_features[name] = pd.DataFrame(features)
     dataset_to_features[name].fillna(0.0, inplace=True)
     if "mnli" in name:
-        dataset_to_features[name].to_csv("/home/jyzhao/git/data/MNLI/train_bias_features")
+        dataset_to_features[name].to_csv("/home/data/MNLI/dev_bias_features")
     else:
-        dataset_to_features[name].to_csv("/home/jyzhao/git/data/QQP/train_bias_features") 
+        dataset_to_features[name].to_csv(f"/home/data/QQP/{name}_bias_features") 
 
 #   # Train the model
 #   tf.logging.info("Fitting...")
