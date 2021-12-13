@@ -429,10 +429,11 @@ class QQPProcessor(DataProcessor):
 
   def get_sanity_test(self, filename):
     lines = self._read_tsv(filename)
-
     examples = []
     for (i, line) in enumerate(lines):
-      guid= i
+      if i == 0:
+        continue
+      guid= i - 1
       text_a = line[1]
       text_b = line[2]
       label = line[3]
@@ -1189,7 +1190,7 @@ def load_bias(bias_name):
     
   if bias_name == "None":
     return None
-  path = f"/home/data/QQP/bias/" + bias_name
+  path = f"/home/data/QQP/bias_logits/" + bias_name
   bias = {}
   with open(path, "r") as f:
     lines = f.readlines()

@@ -244,9 +244,9 @@ def build_mnli_bias_only(out_dir):
     dataset_to_features[name] = pd.DataFrame(features)
     dataset_to_features[name].fillna(0.0, inplace=True)
     if "mnli" in name:
-        dataset_to_features[name].to_csv("/home/data/MNLI/dev_bias_features")
+        dataset_to_features[name].to_csv("/home/data/MNLI/dev_bias_features.csv")
     else:
-        dataset_to_features[name].to_csv(f"/home/data/QQP/{name}_bias_features") 
+        dataset_to_features[name].to_csv(f"/home/data/QQP/{name}_bias_features.csv") 
 
 #   # Train the model
 #   tf.logging.info("Fitting...")
