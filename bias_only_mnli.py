@@ -8,7 +8,7 @@ from sklearn.linear_model import LogisticRegression
 
 import numpy as np
 import pandas as pd
-import tensorflow as tf
+# import tensorflow as tf
 from typing import List, Tuple, Iterable, TypeVar
 import regex
 import nltk
@@ -171,6 +171,7 @@ def build_mnli_bias_only(out_dir):
         label = line[-1]
       examples.append([guid, text_a, text_b, label])
     return examples
+    
   def _create_qqp_examples(lines, set_type):
     examples = []
     for (i, line) in enumerate(lines):
@@ -189,10 +190,10 @@ def build_mnli_bias_only(out_dir):
     return examples
 
   dataset_to_examples = {}
-  QQP_training = read_tsv("/home/data/QQP/train.tsv")
-  dataset_to_examples["qqp_train"] = _create_qqp_examples(QQP_training, "train")
-  QQP_training = read_tsv("/home/data/QQP/dev.tsv")
-  dataset_to_examples["qqp_dev"] = _create_qqp_examples(QQP_training, "dev")
+  QQP_training = read_tsv("/local/jyzhao/data/paws/paws_qqp/output/dev_and_test.tsv")
+  dataset_to_examples["paws_qqp_dev_test"] = _create_qqp_examples(QQP_training, "test")
+  # QQP_dev = read_tsv("/home/data/QQP/dev.tsv")
+  # dataset_to_examples["qqp_dev"] = _create_qqp_examples(QQP_dev, "dev")
   # MNLI_training = read_tsv("/home/data/MNLI/dev.tsv")
   # dataset_to_examples["mnli_dev"] = _create_mnli_examples(MNLI_training, "dev")
 
@@ -207,7 +208,8 @@ def build_mnli_bias_only(out_dir):
   # Build the features, store as a pandas dataset
   dataset_to_features = {}
   for name, examples in dataset_to_examples.items():
-    tf.logging.info("Building features for %s.." % name)
+    # tf.logging.info("Building features for %s.." % name)
+    print("Building features for %s.." % name)
     features = []
     for example in examples:
       h = [x.lower() for x in tok.tokenize(example[2])]
@@ -244,9 +246,9 @@ def build_mnli_bias_only(out_dir):
     dataset_to_features[name] = pd.DataFrame(features)
     dataset_to_features[name].fillna(0.0, inplace=True)
     if "mnli" in name:
-        dataset_to_features[name].to_csv("/home/data/MNLI/dev_bias_features.csv")
+        dataset_to_features[name].to_csv("/local/jyzhao/data/MNLI/dev_bias_features.csv")
     else:
-        dataset_to_features[name].to_csv(f"/home/data/QQP/{name}_bias_features.csv") 
+        dataset_to_features[name].to_csv(f"/local/jyzhao/data/QQP/{name}_bias_features.csv") 
 
 #   # Train the model
 #   tf.logging.info("Fitting...")

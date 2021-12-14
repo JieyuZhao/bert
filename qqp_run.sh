@@ -3,7 +3,7 @@
 echo "bias used is $1"
 echo "using GPU $2"
 
-export BERT_DIR=/home/bert/uncased_L-12_H-768_A-12
+export BERT_DIR=/home/bert/uncased_bert_base
 
 CUDA_VISIBLE_DEVICES=$2 python run_classifier.py \
 	  --task_name=QQP\
